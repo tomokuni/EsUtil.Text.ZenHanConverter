@@ -1,0 +1,183 @@
+# パッケージを pack して NuGet.org / GitHub Packages へ公開する再利用ワークフロー（workflow_call）。
+#
+# 配布するパッケージの定義（名前・プロジェクト）は .github/release-config.json が単一所有し、
+# 読み取りは .github/actions/read-config に集約している。
+# パッケージを追加・変更する場合はこのファイルだけを変更する（ワークフローの変更は不要）。
+#
+# .NET SDK のバージョンはリポジトリルートの global.json が単一所有する（ワークフローでは指定しない）。
+#
+# 呼び出し側:
+#   release.yml … リリース時に呼ぶ（version を渡し、そのバージョンで pack してから公開する）
+#
+# 順序: pack（全パッケージ・バージョン適用）→ 公開（NuGet.org → GitHub Packages）
+# 公開は --skip-duplicate により冪等なため、失敗しても同じバージョンで再実行できる。
+#
+# 注意: nuget.org の Trusted Publishing ポリシーは「OIDC トークンを要求するワークフローのファイル名」で
+# 検証される。トークンの要求元は本ワークフロー（publish.yml）であるため、ポリシーの Workflow File には
+# publish.yml を指定する（呼び出し元の release.yml ではない）。
+# ポリシーはリポジトリ単位で、Glob Patterns and Packages に公開するパッケージ ID を明示している。
+# release-config.json へパッケージを追加した場合は、nuget.org のポリシーにもそのパッケージ ID を追記すること。
+name: Publish
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'pack するバージョン（省略時はリポジトリの値を使用）'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  # ────────────────────────────────────────────────────────────
+  # 1. 設定を読む（パッケージの定義を単一ソースから取り出す）
+  # ────────────────────────────────────────────────────────────
+  config:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.read.outputs.packages }}
+      version_file: ${{ steps.read.outputs.version_file }}
+      retention: ${{ steps.read.outputs.artifact_retention_days }}
+      nuget_user: ${{ steps.read.outputs.nuget_user }}
+      nuget_source: ${{ steps.read.outputs.nuget_source }}
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v5
+
+      # matrix で使う packages（1 行の JSON）を含め、全設定をここで読み取る
+      - name: リリース設定を読む
+        id: read
+        uses: ./.github/actions/read-config
+
+  # ────────────────────────────────────────────────────────────
+  # 2. 全パッケージを pack して保管（公開は次のジョブ）
+  # ────────────────────────────────────────────────────────────
+  pack:
+    needs: config
+    runs-on: ubuntu-latest
+    strategy:
+      # 1 つ失敗しても他のパッケージの結果を確認できるよう継続する
+      fail-fast: false
+      matrix:
+        package: ${{ fromJson(needs.config.outputs.packages) }}
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v5
+
+      - name: .NET SDK をセットアップ
+        uses: actions/setup-dotnet@v5
+        with:
+          # バージョンは global.json が単一所有する（dotnet-version は指定しない）
+          # NuGet のグローバル パッケージ フォルダをキャッシュする
+          cache: true
+          cache-dependency-path: '**/*.csproj'
+
+      # リリース時は、コミット前に pack するため作業ツリーへバージョンを適用する
+      # （公開するパッケージと、リリースでコミットするバージョンを一致させる）
+      - name: バージョンを設定
+        if: inputs.version != ''
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+          VERSION_FILE: ${{ needs.config.outputs.version_file }}
+        run: ./.github/scripts/set-version.ps1 -Version $env:VERSION -VersionFile $env:VERSION_FILE | Out-Null
+
+      # pack の前に明示的にビルドする。
+      # GeneratePackageOnBuild に頼ると、クリーンな状態の dotnet pack が
+      # NU5026（パックする dll が見つからない）で失敗するため、工程を分けて実行する
+      - name: ${{ matrix.package.name }} をビルド
+        run: dotnet build '${{ matrix.package.project }}' -c Release
+
+      - name: ${{ matrix.package.name }} を pack
+        # プロジェクトのパスは設定（release-config.json）が持つ
+        run: dotnet pack '${{ matrix.package.project }}' -c Release --no-build -o ./artifacts
+
+      # この成果物は公開（push ジョブ）と、Release への添付（release.yml）で使う
+      - name: 成果物をアップロード
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.package.name }}
+          path: artifacts/*.nupkg
+          if-no-files-found: error
+          retention-days: ${{ needs.config.outputs.retention }}
+
+  # ────────────────────────────────────────────────────────────
+  # 3. 公開（NuGet.org / GitHub Packages）
+  # ────────────────────────────────────────────────────────────
+  push:
+    needs: [config, pack]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # NuGet.org の Trusted Publishing（OIDC トークンの発行）
+      id-token: write
+      # GitHub Packages への push
+      packages: write
+    steps:
+      # バージョンは global.json が単一所有する（dotnet-version は指定しない）
+      # ここでは復元を行わないためキャッシュは使わない（dotnet nuget push のみ）
+      - name: .NET SDK をセットアップ
+        uses: actions/setup-dotnet@v5
+
+      # pack ジョブが保管したパッケージを 1 つのフォルダへ集約する
+      - name: 成果物をダウンロード
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 公開対象を確認
+        run: |
+          ls -l artifacts
+          COUNT=$(find artifacts -maxdepth 1 -name '*.nupkg' | wc -l)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "公開するパッケージがありません" >&2
+            exit 1
+          fi
+
+      # Trusted Publishing: GitHub の OIDC トークンを nuget.org が検証し、
+      # 有効期限 1 時間の一時 API キーを払い出す（長期 API キー・Secrets は不要）
+      # 一時キーは短命なため、push の直前に取得する
+      - name: NuGet.org にログイン（OIDC -> 一時 API キー）
+        id: nuget_login
+        uses: NuGet/login@v1
+        with:
+          # nuget.org のプロファイル名（メールアドレスではない）
+          user: ${{ needs.config.outputs.nuget_user }}
+
+      # --skip-duplicate により、再実行時（既に公開済み）はスキップされ冪等になる
+      - name: NuGet.org へ公開
+        env:
+          # 一時 API キーはログに出さないよう環境変数経由で渡す
+          NUGET_API_KEY: ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
+          NUGET_SOURCE: ${{ needs.config.outputs.nuget_source }}
+        run: |
+          dotnet nuget push 'artifacts/*.nupkg' \
+            --api-key "$NUGET_API_KEY" \
+            --source "$NUGET_SOURCE" \
+            --skip-duplicate
+
+      # GITHUB_TOKEN で認証するため追加の Secrets は不要（Packages: Write 権限を使用）
+      - name: GitHub Packages のソースを追加
+        env:
+          GH_PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          dotnet nuget add source \
+            --username "${{ github.actor }}" \
+            --password "$GH_PACKAGES_TOKEN" \
+            --store-password-in-clear-text \
+            --name github \
+            "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+
+      # こちらも --skip-duplicate により冪等
+      - name: GitHub Packages へ公開
+        env:
+          GH_PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          dotnet nuget push 'artifacts/*.nupkg' \
+            --api-key "$GH_PACKAGES_TOKEN" \
+            --source github \
+            --skip-duplicate

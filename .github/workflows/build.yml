@@ -1,0 +1,86 @@
+# ビルドワークフロー（全リポジトリで同一の内容。リポジトリ固有の設定は .github/release-config.json が持つ）
+#
+# 実行契機は次のとおり。
+#   main への push（マージ含む） … 必ず実行する
+#   main 向け Pull Request       … 必ず実行する
+#   release/** への push         … 系列ブランチ（release/<major>.<minor>）のゲートとして実行する
+#   手動実行（workflow_dispatch）  … dev など他のブランチで確認する場合に使用する
+#
+# 復元・Release ビルド・全テストを実行し、生成されたパッケージ（nupkg）を
+# アーティファクトとして保管する（NuGet.org への登録は行わない）。
+#
+# 本ワークフローは「検証」だけを行い、公開は release.yml が publish.yml を通じて行う。
+# この実行結果はリリースの前提（ゲート）になる。Release ワークフローは、リリース対象コミットに対する
+# 本ワークフローの成功実行が存在することを確認してから Release を作成する。
+#
+# パッケージング（dotnet pack）も本ワークフローで検証する。
+# 本ワークフローの成功は「パッケージが作成できる」ことも意味する。
+#
+# .NET SDK のバージョンはリポジトリルートの global.json が単一所有する（ワークフローでは指定しない）。
+# dotnet の対象（ソリューション ファイル）は release-config.json の solutionFile が単一所有する。
+# NuGet パッケージのキャッシュは setup-dotnet の cache 機能を使う（actions/cache を別途書かない）。
+#
+# README の「build」バッジはこのワークフローの status を表示する（badge.svg?branch=main）。
+name: Build
+
+on:
+  push:
+    # main への push では必ず実行する（dev への push では実行しない。dev で確認する場合は手動実行する）
+    # release/** は系列ブランチ（release/<major>.<minor>）からのバックポート時に、ゲートの Build として実行する
+    branches: [main, 'release/**']
+  pull_request:
+    branches: [main]
+  # 手動実行（dev など任意のブランチでの確認、およびバージョンコミットの検証に使用する）
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一ブランチの古い実行は打ち切る（バッジは最新の実行結果を表示する）
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@v5
+
+      # リリース設定（保持期間など）は release-config.json が単一所有する
+      - name: リリース設定を読む
+        id: config
+        uses: ./.github/actions/read-config
+
+      - name: .NET SDK をセットアップ
+        uses: actions/setup-dotnet@v5
+        with:
+          # バージョンは global.json が単一所有する（dotnet-version は指定しない）
+          # NuGet のグローバル パッケージ フォルダをキャッシュする
+          cache: true
+          cache-dependency-path: '**/*.csproj'
+
+      # 以降は --no-restore / --no-build で工程を分け、失敗箇所を切り分けやすくする
+      # パスは設定（release-config.json）が持つため、空白を含んでいても壊れないよう引用符で囲む
+      - name: 復元
+        run: dotnet restore '${{ steps.config.outputs.solution_file }}'
+
+      - name: ビルド（Release）
+        run: dotnet build '${{ steps.config.outputs.solution_file }}' -c Release --no-restore
+
+      - name: テスト（Release）
+        run: dotnet test '${{ steps.config.outputs.solution_file }}' -c Release --no-build
+
+      # 公開はしないが、pack が通ることを検証し、内容の確認用に nupkg を保管する
+      # pack する対象はソリューションが持つ（パッケージの定義をワークフローへ書き戻さない）
+      - name: パッケージを作成
+        run: dotnet pack '${{ steps.config.outputs.solution_file }}' -c Release --no-build -o ./artifacts
+
+      - name: パッケージを保管
+        uses: actions/upload-artifact@v6
+        with:
+          name: nupkg
+          path: artifacts/*.nupkg
+          if-no-files-found: error
+          retention-days: ${{ steps.config.outputs.artifact_retention_days }}

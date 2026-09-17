@@ -1,0 +1,71 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- .NET 10 / C# 14 を対象とする -->
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GenerateDocumentationFile>True</GenerateDocumentationFile>
+  </PropertyGroup>
+  
+  <!-- プロダクト情報 -->
+  <!-- バージョンはリポジトリルートの Directory.Build.props が単一所有する（ここでは指定しない） -->
+  <PropertyGroup>
+    <Product>ZenHanConverter</Product>
+    <Description>Full-width and half-width character conversion library for Japanese text</Description>
+    <RootNamespace>EsUtil.Text.ZenHanConverter</RootNamespace>
+    <AssemblyName>EsUtil.Text.ZenHanConverter</AssemblyName>
+  </PropertyGroup>
+
+  <!-- パッケージ情報 -->
+  <PropertyGroup>
+    <PackageId>$(AssemblyName)</PackageId>
+    <PackageProjectUrl>https://github.com/tomokuni/EsUtil.Text.ZenHanConverter</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/tomokuni/EsUtil.Text.ZenHanConverter</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>japanese;zenkaku;hankaku;fullwidth;halfwidth;kana;katakana;hiragana;normalize;converter;text</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <Authors>SEKIYA Tomokuni</Authors>
+    <Company>Estable</Company>
+    <Copyright>SEKIYA Tomokuni</Copyright>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <EnforceCodeStyleInBuild>True</EnforceCodeStyleInBuild>
+    <SignAssembly>False</SignAssembly>
+  </PropertyGroup>
+
+  <!-- 追加アイテム -->
+  <ItemGroup>
+    <!-- README は NuGet パッケージに同梱する -->
+    <Content Include="..\README.md" Pack="true" PackagePath="\" />
+    <!-- Copilot 指示書はソリューション エクスプローラーで参照するのみ（パッケージには含めない） -->
+    <Content Include="..\.github\copilot-instructions.md" Pack="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="src\Generated.tt">
+      <Generator>TextTemplatingFileGenerator</Generator>
+      <LastGenOutput>Generated.cs</LastGenOutput>
+    </None>
+    <Compile Update="src\Generated.cs">
+      <DesignTime>True</DesignTime>
+      <AutoGen>True</AutoGen>
+      <DependentUpon>Generated.tt</DependentUpon>
+    </Compile>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Service Include="{508349b6-6b84-4df5-91f0-309beebad82d}" />
+  </ItemGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+    <IsPublishable>False</IsPublishable>
+    <IsTrimmable>True</IsTrimmable>
+    <IsAotCompatible>True</IsAotCompatible>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+    <IsPublishable>False</IsPublishable>
+    <IsTrimmable>True</IsTrimmable>
+    <IsAotCompatible>True</IsAotCompatible>
+  </PropertyGroup>
+  
+</Project>
